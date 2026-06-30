@@ -52,9 +52,14 @@ export default function Assistant() {
   const [savedMessage, setSavedMessage] = useState("");
   const [projectName, setProjectName] = useState("My Project");
   const [editingName, setEditingName] = useState(false);
+  const [interimTranscript, setInterimTranscript] = useState("");
+  const [formalizing, setFormalizing] = useState(false);
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const recognitionRef = useRef<any>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const finalTranscriptRef = useRef<string>("");
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -63,9 +68,17 @@ export default function Assistant() {
   const speak = (text: string) => {
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(text);
-    utterance.rate = 1;
+    utterance.rate = 0.95;
     utterance.pitch = 1;
     utterance.volume = 1;
+
+    // Pick best available voice
+    const voices = window.speechSynthesis.getVoices();
+    const preferred = voices.find(v =>
+      v.name.includes("Google") || v.name.includes("Natural") || v.name.includes("Neural")
+    );
+    if (preferred) utterance.voice = preferred;
+
     utterance.onstart = () => setIsSpeaking(true);
     utterance.onend = () => {
       setIsSpeaking(false);
@@ -74,31 +87,120 @@ export default function Assistant() {
     window.speechSynthesis.speak(utterance);
   };
 
+  // Formalize casual speech using AI
+  const formalizeText = async (text: string): Promise<string> => {
+    try {
+      const res = await fetch("/api/formalize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      const data = await res.json();
+      return data.formalized || text;
+    } catch {
+      return text;
+    }
+  };
+
   const startListening = () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SR) { alert("Please use Chrome for voice recognition."); return; }
+    if (!SR) {
+      alert("Please use Chrome for voice recognition.");
+      return;
+    }
+
+    // Stop any existing recognition
+    if (recognitionRef.current) {
+      recognitionRef.current.stop();
+    }
+
     const recognition = new SR();
     recognition.lang = "en-US";
-    recognition.continuous = false;
-    recognition.interimResults = false;
-    recognition.onstart = () => setIsListening(true);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    recognition.onresult = async (event: any) => {
-      const transcript = event.results[0][0].transcript;
-      setIsListening(false);
-      setInput(transcript);
-      await sendMessage(transcript);
+    recognition.continuous = true; // Keep listening continuously
+    recognition.interimResults = true; // Show words as they're spoken
+    recognition.maxAlternatives = 3; // Get multiple alternatives for better accuracy
+
+    finalTranscriptRef.current = "";
+
+    recognition.onstart = () => {
+      setIsListening(true);
+      setInterimTranscript("");
     };
-    recognition.onerror = () => setIsListening(false);
-    recognition.onend = () => setIsListening(false);
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    recognition.onresult = (event: any) => {
+      let interim = "";
+      let final = "";
+
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const result = event.results[i];
+        if (result.isFinal) {
+          // Use best alternative
+          final += result[0].transcript;
+        } else {
+          interim += result[0].transcript;
+        }
+      }
+
+      if (final) {
+        finalTranscriptRef.current += " " + final;
+        finalTranscriptRef.current = finalTranscriptRef.current.trim();
+      }
+
+      setInterimTranscript(finalTranscriptRef.current + (interim ? " " + interim : ""));
+
+      // Reset silence timer — wait 2.5 seconds of silence before submitting
+      if (silenceTimerRef.current) {
+        clearTimeout(silenceTimerRef.current);
+      }
+
+      if (finalTranscriptRef.current || interim) {
+        silenceTimerRef.current = setTimeout(async () => {
+          const fullText = finalTranscriptRef.current || interim;
+          if (fullText.trim().length > 2) {
+            recognition.stop();
+          }
+        }, 2500); // 2.5 seconds of silence = done speaking
+      }
+    };
+
+    recognition.onend = async () => {
+      setIsListening(false);
+      setInterimTranscript("");
+
+      const spokenText = finalTranscriptRef.current.trim();
+      if (spokenText.length > 2) {
+        setFormalizing(true);
+        const formalized = await formalizeText(spokenText);
+        setFormalizing(false);
+        setInput(formalized);
+        await sendMessage(formalized);
+      }
+
+      finalTranscriptRef.current = "";
+    };
+
+    recognition.onerror = () => {
+      setIsListening(false);
+      setInterimTranscript("");
+      finalTranscriptRef.current = "";
+    };
+
     recognitionRef.current = recognition;
     recognition.start();
   };
 
   const stopListening = () => {
-    recognitionRef.current?.stop();
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+    }
+    if (recognitionRef.current) {
+      recognitionRef.current.stop();
+    }
     setIsListening(false);
+    setInterimTranscript("");
+    finalTranscriptRef.current = "";
   };
 
   const sendMessage = async (overrideInput?: string) => {
@@ -294,20 +396,21 @@ export default function Assistant() {
     window.speechSynthesis.cancel();
     setVoiceMode(!voiceMode);
     setIsListening(false);
+    setInterimTranscript("");
   };
 
   const resetChat = () => {
     window.speechSynthesis.cancel();
+    stopListening();
     setMessages([{
       role: "assistant",
       content: "Hi! I'm your AI Project Assistant. Tell me about the idea you want to build — even if it's rough, we'll figure it out together! 🚀",
     }]);
     setDocuments(null);
     setInput("");
-    setIsListening(false);
-    setIsSpeaking(false);
     setVersions([]);
     setProjectName("My Project");
+    setInterimTranscript("");
   };
 
   const userMessageCount = messages.filter(m => m.role === "user").length;
@@ -368,19 +471,31 @@ export default function Assistant() {
         {/* Voice Status */}
         {voiceMode && (
           <div className="mb-3 text-center">
-            {isListening && (
-              <div className="inline-flex items-center gap-2 bg-red-500/20 border border-red-500/40 text-red-400 px-4 py-2 rounded-full text-sm animate-pulse">
-                <Mic size={14} /> Listening...
+            {formalizing && (
+              <div className="inline-flex items-center gap-2 bg-yellow-500/20 border border-yellow-500/40 text-yellow-400 px-4 py-2 rounded-full text-sm animate-pulse">
+                ✨ Formalizing your message...
               </div>
             )}
-            {isSpeaking && (
+            {isListening && !formalizing && (
+              <div className="flex flex-col items-center gap-2">
+                <div className="inline-flex items-center gap-2 bg-red-500/20 border border-red-500/40 text-red-400 px-4 py-2 rounded-full text-sm animate-pulse">
+                  <Mic size={14} /> Listening — speak freely, I'll wait...
+                </div>
+                {interimTranscript && (
+                  <div className="max-w-lg text-xs text-gray-400 bg-gray-800/50 px-3 py-2 rounded-lg text-center">
+                    {interimTranscript}
+                  </div>
+                )}
+              </div>
+            )}
+            {isSpeaking && !formalizing && (
               <div className="inline-flex items-center gap-2 bg-purple-500/20 border border-purple-500/40 text-purple-400 px-4 py-2 rounded-full text-sm animate-pulse">
                 <Volume2 size={14} /> Speaking...
               </div>
             )}
-            {!isListening && !isSpeaking && (
+            {!isListening && !isSpeaking && !formalizing && (
               <div className="inline-flex items-center gap-2 bg-gray-800/50 border border-gray-700 text-gray-500 px-4 py-2 rounded-full text-sm">
-                🎙 Click the mic button to speak
+                🎙 Click mic and speak — I'll wait until you finish
               </div>
             )}
           </div>
@@ -440,7 +555,6 @@ export default function Assistant() {
         {documents && (
           <div className="mb-4 rounded-2xl p-4" style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)" }}>
 
-            {/* Project Name + Controls */}
             <div className="flex justify-between items-center mb-3 flex-wrap gap-2">
               <div className="flex items-center gap-2">
                 {editingName ? (
@@ -489,7 +603,6 @@ export default function Assistant() {
               </div>
             </div>
 
-            {/* Version History */}
             {showVersions && (
               <div className="mb-3 p-3 rounded-xl" style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)" }}>
                 <p className="text-gray-400 text-xs mb-2 font-medium">Version History</p>
@@ -512,7 +625,6 @@ export default function Assistant() {
               </div>
             )}
 
-            {/* Document Tabs */}
             <div className="flex flex-wrap gap-2 mb-3">
               {DOC_TABS.map((doc) => (
                 <button
@@ -529,14 +641,12 @@ export default function Assistant() {
               ))}
             </div>
 
-            {/* Document Content */}
             <div className="max-h-48 overflow-y-auto mb-3">
               <pre className="text-gray-300 text-xs whitespace-pre-wrap leading-relaxed">
                 {documents[activeDoc]}
               </pre>
             </div>
 
-            {/* Refine Section */}
             <div className="border-t pt-3" style={{ borderColor: "rgba(255,255,255,0.07)" }}>
               <p className="text-gray-500 text-xs mb-2">✏️ Refine the <span className="text-purple-400">{DOC_TABS.find(d => d.key === activeDoc)?.label}</span> document:</p>
               <div className="flex gap-2">

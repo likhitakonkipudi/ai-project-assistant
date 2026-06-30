@@ -1,7 +1,9 @@
 "use client";
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useSession, signOut } from "next-auth/react";
+import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { Sparkles, Trash2, ExternalLink, FileText, MessageSquare, Clock } from "lucide-react";
+import { Sparkles, Trash2, ExternalLink, FileText, MessageSquare, Clock, LogOut } from "lucide-react";
 
 const DOC_TABS = [
   { key: "prd", label: "PRD" },
@@ -16,29 +18,46 @@ const DOC_TABS = [
   { key: "investor", label: "Investor" },
 ];
 
-interface VersionEntry { version: number; timestamp: string; }
 interface Project {
-  id: number; name: string; date: string; time: string;
-  documents: Record<string, string>; versions: VersionEntry[]; messageCount: number;
-}
-
-function getProjects(): Project[] {
-  try { return JSON.parse(localStorage.getItem("ai_projects") || "[]"); } catch { return []; }
-}
-function saveProjects(list: Project[]) {
-  localStorage.setItem("ai_projects", JSON.stringify(list));
+  _id: string;
+  name: string;
+  date: string;
+  time: string;
+  documents: Record<string, string>;
+  versions: { version: number; timestamp: string }[];
+  messageCount: number;
 }
 
 export default function Dashboard() {
-  const [projects, setProjects] = useState<Project[]>(getProjects);
+  const { data: session, status } = useSession();
+  const router = useRouter();
+  const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
   const [activeDoc, setActiveDoc] = useState("prd");
+  const [loadingProjects, setLoadingProjects] = useState(true);
 
-  const deleteProject = (id: number) => {
-    const updated = projects.filter((p) => p.id !== id);
+  useEffect(() => {
+    if (status === "unauthenticated") router.push("/login");
+  }, [status, router]);
+
+  useEffect(() => {
+    if (status === "authenticated") {
+      fetch("/api/projects")
+        .then(r => r.json())
+        .then(data => { setProjects(data.projects || []); setLoadingProjects(false); })
+        .catch(() => setLoadingProjects(false));
+    }
+  }, [status]);
+
+  const deleteProject = async (id: string) => {
+    await fetch("/api/projects", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+    const updated = projects.filter(p => p._id !== id);
     setProjects(updated);
-    saveProjects(updated);
-    if (selectedProject?.id === id) setSelectedProject(null);
+    if (selectedProject?._id === id) setSelectedProject(null);
   };
 
   const downloadMarkdown = (project: Project) => {
@@ -51,20 +70,32 @@ export default function Dashboard() {
     a.click();
   };
 
+  if (status === "loading" || loadingProjects) {
+    return (
+      <main className="min-h-screen flex items-center justify-center" style={{ background: "linear-gradient(135deg, #0a0a0f 0%, #0f0f1a 50%, #0a0a0f 100%)" }}>
+        <div className="text-purple-400 text-lg animate-pulse">Loading...</div>
+      </main>
+    );
+  }
+
   return (
     <main className="min-h-screen text-white p-6" style={{ background: "linear-gradient(135deg, #0a0a0f 0%, #0f0f1a 50%, #0a0a0f 100%)" }}>
       <div className="max-w-6xl mx-auto">
-        <div className="flex justify-between items-center mb-8">
+
+        <div className="flex justify-between items-center mb-8 flex-wrap gap-4">
           <div className="flex items-center gap-3">
             <Sparkles size={24} className="text-purple-400" />
             <div>
               <h1 className="text-2xl font-bold">Project Dashboard</h1>
-              <p className="text-gray-500 text-sm">{projects.length} saved project{projects.length !== 1 ? "s" : ""}</p>
+              <p className="text-gray-500 text-sm">Welcome, {session?.user?.name} · {projects.length} project{projects.length !== 1 ? "s" : ""}</p>
             </div>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 flex-wrap">
             <Link href="/" className="px-4 py-2 rounded-full text-sm text-gray-400 hover:text-white border border-gray-700 transition">← Home</Link>
             <Link href="/assistant" className="px-5 py-2.5 rounded-xl text-sm font-medium text-white" style={{ background: "linear-gradient(135deg, #7c3aed, #6d28d9)" }}>+ New Project</Link>
+            <button onClick={() => signOut({ callbackUrl: "/login" })} className="flex items-center gap-1 px-3 py-2 rounded-full text-sm text-gray-400 hover:text-red-400 border border-gray-700 transition">
+              <LogOut size={13} /> Sign Out
+            </button>
           </div>
         </div>
 
@@ -72,7 +103,7 @@ export default function Dashboard() {
           <div className="text-center py-24">
             <FileText size={48} className="text-gray-700 mx-auto mb-4" />
             <p className="text-gray-500 text-lg mb-2">No saved projects yet</p>
-            <p className="text-gray-600 text-sm mb-6">Generate documents in the assistant and click Save to see them here</p>
+            <p className="text-gray-600 text-sm mb-6">Generate documents in the assistant and click Save</p>
             <Link href="/assistant" className="inline-flex items-center gap-2 px-6 py-3 rounded-xl text-white font-medium" style={{ background: "linear-gradient(135deg, #7c3aed, #3b82f6)" }}>Start a Project</Link>
           </div>
         ) : (
@@ -80,11 +111,11 @@ export default function Dashboard() {
             <div className="lg:col-span-1 space-y-3">
               <h2 className="text-sm font-medium text-gray-400 mb-3 uppercase tracking-wider">Your Projects</h2>
               {projects.map((project) => (
-                <div key={project.id} onClick={() => { setSelectedProject(project); setActiveDoc("prd"); }}
+                <div key={project._id} onClick={() => { setSelectedProject(project); setActiveDoc("prd"); }}
                   className="p-4 rounded-xl cursor-pointer transition-all"
                   style={{
-                    background: selectedProject?.id === project.id ? "rgba(124,58,237,0.15)" : "rgba(255,255,255,0.03)",
-                    border: selectedProject?.id === project.id ? "1px solid rgba(124,58,237,0.4)" : "1px solid rgba(255,255,255,0.06)",
+                    background: selectedProject?._id === project._id ? "rgba(124,58,237,0.15)" : "rgba(255,255,255,0.03)",
+                    border: selectedProject?._id === project._id ? "1px solid rgba(124,58,237,0.4)" : "1px solid rgba(255,255,255,0.06)",
                   }}>
                   <div className="flex justify-between items-start">
                     <div className="flex-1 min-w-0">
@@ -95,7 +126,7 @@ export default function Dashboard() {
                         <span className="flex items-center gap-1 text-xs text-gray-500"><FileText size={10} /> V{project.versions?.length || 1}</span>
                       </div>
                     </div>
-                    <button onClick={(e) => { e.stopPropagation(); deleteProject(project.id); }} className="text-gray-600 hover:text-red-400 transition ml-2">
+                    <button onClick={(e) => { e.stopPropagation(); deleteProject(project._id); }} className="text-gray-600 hover:text-red-400 transition ml-2">
                       <Trash2 size={14} />
                     </button>
                   </div>
